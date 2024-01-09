@@ -27,6 +27,7 @@
 #include "protos/perfetto/common/builtin_clock.pbzero.h"
 #include "protos/perfetto/trace/ftrace/ftrace_event.pbzero.h"
 #include "protos/perfetto/trace/ftrace/ftrace_event_bundle.pbzero.h"
+#include "protos/perfetto/trace/ftrace/kgsl.pbzero.h"
 
 namespace perfetto {
 namespace trace_processor {
@@ -198,6 +199,41 @@ void FtraceTokenizer::TokenizeFtraceEvent(uint32_t cpu,
     }
   }
 
+  // Shift timestamp
+  {
+    auto adreno_cmdbatch_retired_field = GetFtraceEventField(
+        protos::pbzero::FtraceEvent::kAdrenoCmdbatchRetiredFieldNumber, event);
+    if (adreno_cmdbatch_retired_field.has_value()) {
+      protos::pbzero::AdrenoCmdbatchRetiredFtraceEvent::Decoder evt(
+          adreno_cmdbatch_retired_field.value().data(),
+          adreno_cmdbatch_retired_field.value().size());
+
+      const uint64_t duration = (evt.retire() - evt.start()) * 1000000 / 19200;
+      raw_timestamp -= duration;
+
+      const uint32_t ts = evt.timestamp(); // the timestamp field is a unique ID that marks a cmdbatch.
+      auto it = sync_time_map_.find(ts);
+      if (it != sync_time_map_.end()) {
+        const auto& info = it->second;
+        raw_timestamp = info.sync_time + (evt.start() - info.ticks) * 1000000 / 19200;
+        sync_time_map_.erase(it);
+      }
+    }
+
+    auto adreno_cmdbatch_submitted_field = GetFtraceEventField(
+        protos::pbzero::FtraceEvent::kAdrenoCmdbatchSubmittedFieldNumber, event);
+    if (adreno_cmdbatch_submitted_field.has_value()) {
+      protos::pbzero::AdrenoCmdbatchSubmittedFtraceEvent::Decoder evt(
+          adreno_cmdbatch_submitted_field.value().data(),
+          adreno_cmdbatch_submitted_field.value().size());
+      const uint64_t sync_time = static_cast<uint64_t>(evt.secs()) * 1000000000ULL +
+          static_cast<uint64_t>(evt.usecs()) * 1000ULL;
+      // fprintf(stderr, "sync_time=%llu ts=%llu\n", sync_time, raw_timestamp);
+      const uint32_t ts = evt.timestamp(); // the timestamp field is a unique ID that marks a cmdbatch.
+      sync_time_map_[ts] = {sync_time, evt.ticks()};
+    }
+  }
+
   // Slowpath for finding the event id.
   if (PERFETTO_UNLIKELY(event_id == 0)) {
     ProtoDecoder decoder(data, length);
@@ -366,6 +402,22 @@ void FtraceTokenizer::HandleFtraceClockSnapshot(int64_t ftrace_ts,
       {ClockTracker::ClockTimestamp(global_id, ftrace_ts),
        ClockTracker::ClockTimestamp(BuiltinClock::BUILTIN_CLOCK_BOOTTIME,
                                     boot_ts)});
+}
+
+std::optional<protozero::Field> FtraceTokenizer::GetFtraceEventField(
+    uint32_t event_id,
+    const TraceBlobView& event) {
+  //  Extract ftrace event field by decoding event trace blob.
+  const uint8_t* data = event.data();
+  const size_t length = event.length();
+
+  ProtoDecoder decoder(data, length);
+  auto ts_field = decoder.FindField(event_id);
+  if (!ts_field.valid()) {
+    context_->storage->IncrementStats(stats::ftrace_bundle_tokenizer_errors);
+    return std::nullopt;
+  }
+  return ts_field;
 }
 
 }  // namespace trace_processor

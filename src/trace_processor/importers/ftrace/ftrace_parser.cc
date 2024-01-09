@@ -20,24 +20,6 @@
 #include "perfetto/ext/base/string_utils.h"
 #include "perfetto/ext/base/string_writer.h"
 #include "perfetto/protozero/proto_decoder.h"
-#include "src/trace_processor/importers/common/args_tracker.h"
-#include "src/trace_processor/importers/common/async_track_set_tracker.h"
-#include "src/trace_processor/importers/common/metadata_tracker.h"
-#include "src/trace_processor/importers/common/parser_types.h"
-#include "src/trace_processor/importers/common/process_tracker.h"
-#include "src/trace_processor/importers/common/track_tracker.h"
-#include "src/trace_processor/importers/ftrace/binder_tracker.h"
-#include "src/trace_processor/importers/ftrace/thread_state_tracker.h"
-#include "src/trace_processor/importers/ftrace/v4l2_tracker.h"
-#include "src/trace_processor/importers/ftrace/virtio_video_tracker.h"
-#include "src/trace_processor/importers/i2c/i2c_tracker.h"
-#include "src/trace_processor/importers/proto/packet_sequence_state.h"
-#include "src/trace_processor/importers/syscalls/syscall_tracker.h"
-#include "src/trace_processor/importers/systrace/systrace_parser.h"
-#include "src/trace_processor/storage/stats.h"
-#include "src/trace_processor/storage/trace_storage.h"
-#include "src/trace_processor/types/softirq_action.h"
-#include "src/trace_processor/types/tcp_state.h"
 #include "protos/perfetto/common/gpu_counter_descriptor.pbzero.h"
 #include "protos/perfetto/trace/ftrace/android_fs.pbzero.h"
 #include "protos/perfetto/trace/ftrace/binder.pbzero.h"
@@ -56,6 +38,7 @@
 #include "protos/perfetto/trace/ftrace/i2c.pbzero.h"
 #include "protos/perfetto/trace/ftrace/ion.pbzero.h"
 #include "protos/perfetto/trace/ftrace/irq.pbzero.h"
+#include "protos/perfetto/trace/ftrace/kgsl.pbzero.h"
 #include "protos/perfetto/trace/ftrace/kmem.pbzero.h"
 #include "protos/perfetto/trace/ftrace/lowmemorykiller.pbzero.h"
 #include "protos/perfetto/trace/ftrace/lwis.pbzero.h"
@@ -83,6 +66,24 @@
 #include "protos/perfetto/trace/ftrace/vmscan.pbzero.h"
 #include "protos/perfetto/trace/ftrace/workqueue.pbzero.h"
 #include "protos/perfetto/trace/interned_data/interned_data.pbzero.h"
+#include "src/trace_processor/importers/common/args_tracker.h"
+#include "src/trace_processor/importers/common/async_track_set_tracker.h"
+#include "src/trace_processor/importers/common/metadata_tracker.h"
+#include "src/trace_processor/importers/common/parser_types.h"
+#include "src/trace_processor/importers/common/process_tracker.h"
+#include "src/trace_processor/importers/common/track_tracker.h"
+#include "src/trace_processor/importers/ftrace/binder_tracker.h"
+#include "src/trace_processor/importers/ftrace/thread_state_tracker.h"
+#include "src/trace_processor/importers/ftrace/v4l2_tracker.h"
+#include "src/trace_processor/importers/ftrace/virtio_video_tracker.h"
+#include "src/trace_processor/importers/i2c/i2c_tracker.h"
+#include "src/trace_processor/importers/proto/packet_sequence_state.h"
+#include "src/trace_processor/importers/syscalls/syscall_tracker.h"
+#include "src/trace_processor/importers/systrace/systrace_parser.h"
+#include "src/trace_processor/storage/stats.h"
+#include "src/trace_processor/storage/trace_storage.h"
+#include "src/trace_processor/types/softirq_action.h"
+#include "src/trace_processor/types/tcp_state.h"
 
 namespace perfetto {
 namespace trace_processor {
@@ -217,7 +218,7 @@ std::string GetUfsCmdString(uint32_t ufsopcode, uint32_t gid) {
   }
   return buffer;
 }
-} // namespace
+}  // namespace
 FtraceParser::FtraceParser(TraceProcessorContext* context)
     : context_(context),
       rss_stat_tracker_(context),
@@ -645,6 +646,10 @@ util::Status FtraceParser::ParseFtraceEvent(uint32_t cpu,
       }
       case FtraceEvent::kIonStatFieldNumber: {
         ParseIonStat(ts, pid, fld_bytes);
+        break;
+      }
+      case FtraceEvent::kAdrenoCmdbatchRetiredFieldNumber: {
+        ParseAdrenoCmdbatchRetired(ts, pid, fld_bytes);
         break;
       }
       case FtraceEvent::kDmaHeapStatFieldNumber: {
@@ -1573,6 +1578,32 @@ void FtraceParser::ParseIonStat(int64_t timestamp,
         context_->async_track_set_tracker->End(async_track, ion.buffer_id());
     context_->slice_tracker->End(timestamp, end_id);
   }
+}
+
+/** TODO: update comments */
+void FtraceParser::ParseAdrenoCmdbatchRetired(int64_t timestamp,
+                                              uint32_t pid,
+                                              protozero::ConstBytes data) {
+  (void)(pid);
+
+  protos::pbzero::AdrenoCmdbatchRetiredFtraceEvent::Decoder evt(data.data,
+                                                                data.size);
+
+  // Global track for individual buffer tracking
+  base::StackString<32> str("GPU (Ctx=%d)", evt.id());
+  StringId gpu_context_id = context_->storage->InternString(str.string_view());
+  auto async_track =
+      context_->async_track_set_tracker->InternGlobalTrackSet(gpu_context_id);
+
+  const int64_t duration = (evt.retire() - evt.start()) * 1000000 / 19200;
+
+  std::string buf = "GPU";
+  StringId slice_name_id =
+      context_->storage->InternString(base::StringView(buf));
+  TrackId track_id =
+      context_->async_track_set_tracker->Scoped(async_track, timestamp, 0);
+  context_->slice_tracker->Scoped(timestamp, track_id, tcp_event_id_,
+                                  slice_name_id, duration);
 }
 
 void FtraceParser::ParseDmaHeapStat(int64_t timestamp,

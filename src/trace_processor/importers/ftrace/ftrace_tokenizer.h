@@ -24,6 +24,9 @@
 
 #include "protos/perfetto/trace/ftrace/ftrace_event_bundle.pbzero.h"
 
+#include <optional>
+#include <unordered_map>
+
 namespace perfetto {
 namespace trace_processor {
 
@@ -61,6 +64,10 @@ class FtraceTokenizer {
                                  int64_t boot_ts,
                                  uint32_t packet_sequence_id);
 
+  std::optional<protozero::Field> GetFtraceEventField(
+      uint32_t event_id,
+      const TraceBlobView& event);
+
   void DlogWithLimit(base::Status status) {
     static std::atomic<uint32_t> dlog_count(0);
     if (dlog_count++ < 10)
@@ -69,6 +76,12 @@ class FtraceTokenizer {
 
   int64_t latest_ftrace_clock_snapshot_ts_ = 0;
   TraceProcessorContext* context_;
+
+  struct TimestampSyncInfo {
+    uint64_t sync_time;
+    uint64_t ticks;
+  };
+  std::unordered_map<uint32_t, TimestampSyncInfo> sync_time_map_;
 };
 
 }  // namespace trace_processor
